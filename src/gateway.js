@@ -13,6 +13,7 @@ const AI_TIMEOUT_MS = 30 * 1000;
 const HEARTBEAT_MARGIN_MS = 3000;
 const PRESENCE_REFRESH_MS = 5 * 60 * 1000;
 const RECONNECT_DELAY_MS = 3000;
+const NOT_READY_TIMEOUT_MS = 60000;
 
 const INTENTS = 33281;
 
@@ -110,6 +111,17 @@ export class DiscordGateway extends DurableObject {
       }
 
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        if (!this.ready && this.wsOpenedAt && now - this.wsOpenedAt >= NOT_READY_TIMEOUT_MS) {
+          console.warn("socket open but never became ready, reconnecting");
+          try {
+            this.ws.close(4000, "stalled handshake");
+          } catch {
+            /* noop */
+          }
+          this.ws = null;
+          this.scheduleHeartbeat(now + RECONNECT_DELAY_MS);
+          return;
+        }
         if (this.heartbeatPending) {
           console.warn("missed heartbeat ack, reconnecting");
           try {
@@ -282,9 +294,20 @@ export class DiscordGateway extends DurableObject {
         }
         break;
       case 9:
+        console.warn("Discord sent Invalid Session, re-identifying");
         this.sessionId = null;
         this.resumeUrl = null;
-        void this.ctx.storage.put(KEY_META, { sessionId: null, resumeUrl: null, seq: this.seq }).catch(() => {});
+        void this.ctx.storage.put(KEY_META, { sessionId: null, resumeUrl: null, seq: null }).catch(() => {});
+        this.ready = false;
+        if (this.ws) {
+          try {
+            this.ws.close(4000, "invalid session");
+          } catch {
+            /* noop */
+          }
+          this.ws = null;
+          this.scheduleHeartbeat(Date.now() + RECONNECT_DELAY_MS);
+        }
         break;
       case 10: {
         this.heartbeatIntervalMs = d.heartbeat_interval;
