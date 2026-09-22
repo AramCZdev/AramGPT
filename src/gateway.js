@@ -37,6 +37,8 @@ export class DiscordGateway extends DurableObject {
     this.ready = false;
     this.lastPresenceSent = 0;
     this.reconnectScheduled = false;
+    this.wsOpenedAt = 0;
+    this.connectTimeoutMs = 15000;
   }
 
   async fetch(request) {
@@ -66,9 +68,29 @@ export class DiscordGateway extends DurableObject {
     try {
       const now = Date.now();
 
+      if (this.ws && this.ws.readyState === WebSocket.CONNECTING) {
+        if (now - this.wsOpenedAt >= this.connectTimeoutMs) {
+          console.warn("connect timed out, retrying");
+          try {
+            this.ws.close(4000, "connect timeout");
+          } catch {
+            /* noop */
+          }
+          this.ws = null;
+          await this.connect();
+        }
+        this.scheduleHeartbeat(now + Math.min(this.connectTimeoutMs, this.heartbeatIntervalMs));
+        return;
+      }
+
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         if (this.heartbeatPending) {
-          this.ws.close(4000, "missed heartbeat ack");
+          console.warn("missed heartbeat ack, reconnecting");
+          try {
+            this.ws.close(4000, "missed heartbeat ack");
+          } catch {
+            /* noop */
+          }
           this.ws = null;
           this.scheduleHeartbeat(now + RECONNECT_DELAY_MS);
           return;
@@ -76,7 +98,13 @@ export class DiscordGateway extends DurableObject {
         this.ws.send(JSON.stringify({ op: 1, d: this.seq }));
         this.heartbeatPending = true;
       } else if (!this.ws) {
-        await this.connect();
+        try {
+          await this.connect();
+        } catch (error) {
+          console.error("connect failed:", error);
+          this.scheduleHeartbeat(now + RECONNECT_DELAY_MS);
+          return;
+        }
       }
 
       if (this.ready && this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -134,6 +162,8 @@ export class DiscordGateway extends DurableObject {
     const ws = new WebSocket(`${gateway.url}?v=${GATEWAY_VERSION}&encoding=json`);
 
     ws.addEventListener("open", () => {
+      this.wsOpenedAt = Date.now();
+      this.heartbeatPending = false;
       console.log("Discord gateway socket open");
     });
 
