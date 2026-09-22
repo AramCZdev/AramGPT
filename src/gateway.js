@@ -22,6 +22,32 @@ const KEY_CONV = "conv:";
 
 const NO_RESUME_CODES = new Set([4000, 4001, 4002, 4004, 4005, 4007, 4008, 4009, 4010, 4013, 4014]);
 
+const PRIVACY_POLICY = `**AramGPT Privacy Policy**
+
+**No data collection by the creator**
+The bot owner (AramCZ) does not collect, store, or sell any data. Nothing you send to the bot is read or kept by the creator.
+
+**What the bot does with your messages**
+AramGPT only processes messages that mention it. It temporarily keeps the last few messages of each conversation (up to 4) to provide context, plus a per-user counter for the daily usage limit (10 requests/day).
+
+**Where data is stored**
+Message history and counters are stored in Cloudflare Durable Objects (SQLite) on Cloudflare's global edge network. Hosting and infrastructure are provided by Cloudflare. See the [Cloudflare Privacy Policy](https://www.cloudflare.com/privacypolicy/).
+
+**What is shared**
+To answer your message, your prompt and short conversation context are sent to OpenRouter.ai and processed by its "free" model. OpenRouter processes this data under its own terms and privacy policy: [OpenRouter Privacy Policy](https://openrouter.ai/privacy). No data is sold or shared with any other third party.
+
+**Retention**
+Conversation history is a rolling window of the most recent messages and is overwritten as you chat. Message content is not stored beyond this short history.
+
+**Your data & you**
+AramGPT does not intentionally collect personal information as defined by GDPR/CCPA. Do not send sensitive personal data to the bot.
+
+**Children**
+AramGPT is not intended for use by children under 13.
+
+**Changes**
+This policy may be updated; continued use after changes constitutes acceptance.`;
+
 export class DiscordGateway extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
@@ -294,6 +320,9 @@ export class DiscordGateway extends DurableObject {
         this.setPresence();
         console.log("Discord session resumed");
         break;
+      case "INTERACTION_CREATE":
+        await this.onInteraction(d);
+        break;
       case "MESSAGE_CREATE":
         await this.onMessageCreate(d);
         break;
@@ -374,6 +403,12 @@ export class DiscordGateway extends DurableObject {
     if (!d.channel_id) return;
 
     if (!this.isMentioned(d)) return;
+
+    const command = this.matchSlashCommand(d.content ?? "");
+    if (command) {
+      await this.reply(d, this.commandOutput(command));
+      return;
+    }
 
     const prompt = this.extractPrompt(d);
     const now = Date.now();
@@ -501,6 +536,47 @@ Personality:
     }
 
     return false;
+  }
+
+  async onInteraction(d) {
+    if (d.type !== 2) return;
+
+    const name = d.data?.name;
+    const content = this.commandOutput(name);
+    if (!content) return;
+
+    try {
+      const response = await fetch(`${DISCORD_API}/interactions/${d.id}/${d.token}/callback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: 4,
+          data: { content }
+        })
+      });
+      if (!response.ok) {
+        console.error(`interaction callback failed with ${response.status}:`, await response.text());
+      }
+    } catch (error) {
+      console.error("interaction callback failed:", error);
+    }
+  }
+
+  matchSlashCommand(content) {
+    if (/^\s*\/?aiprivacypolicy\b/i.test(content)) {
+      return "aiprivacypolicy";
+    }
+    if (/^\s*\/?privacy\b/i.test(content)) {
+      return "aiprivacypolicy";
+    }
+    return null;
+  }
+
+  commandOutput(name) {
+    if (name === "aiprivacypolicy") {
+      return PRIVACY_POLICY;
+    }
+    return null;
   }
 
   extractPrompt(d) {
