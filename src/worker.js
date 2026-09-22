@@ -9,7 +9,7 @@ export default {
     const stub = env.DISCORD_GATEWAY.get(id);
 
     if (url.pathname === "/") {
-      return new Response("AramGPT is running on Cloudflare Workers.", {
+      return new Response("AramGPT is online on Cloudflare Workers.", {
         headers: { "content-type": "text/plain" }
       });
     }
