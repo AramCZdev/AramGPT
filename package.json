@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev --port 8787",
+    "build": "node --check src/worker.js && node --check src/gateway.js",
     "deploy": "wrangler deploy",
     "secret:token": "wrangler secret put DISCORD_TOKEN",
     "secret:openrouter": "wrangler secret put OPENROUTER_API_KEY"
