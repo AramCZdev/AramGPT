@@ -440,9 +440,10 @@ export class DiscordGateway extends DurableObject {
     const rates = (await this.ctx.storage.get(KEY_RATE)) || { users: {} };
     const user = rates.users[userId] || { count: 0, last: 0, resetAt: now };
 
-    if (now - user.resetAt >= DAY_MS) {
+    const utcDayStart = Math.floor(now / DAY_MS) * DAY_MS;
+    if (user.resetAt < utcDayStart) {
       user.count = 0;
-      user.resetAt = now;
+      user.resetAt = utcDayStart;
     }
 
     if (now - user.last < COOLDOWN_MS) {
