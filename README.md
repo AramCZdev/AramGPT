@@ -150,6 +150,4 @@ Global command registration can take up to 1 hour. If it's been longer, re-run `
 **Bot replies "you need to wait" frequently**
 You're hitting the daily or cooldown limit. Wait 5 seconds between messages, and each user gets 10 answers per UTC day.
 
-## License
-
-No license yet — just don't be weird about it. Made by [AramCZ](mailto:aramcz@protonmail.com).
+Made by [AramCZ](mailto:aramcz@protonmail.com).
