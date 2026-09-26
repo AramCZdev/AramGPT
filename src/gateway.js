@@ -6,7 +6,7 @@ const MODEL = "openrouter/free";
 const GATEWAY_VERSION = "10";
 const MAX_MESSAGE_LENGTH = 2000;
 
-const DAILY_LIMIT = 10;
+const DAILY_LIMIT = 20;
 const COOLDOWN_MS = 5000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const AI_TIMEOUT_MS = 30 * 1000;
