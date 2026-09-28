@@ -1,14 +1,14 @@
 # AramGPT
 
-An AI Discord bot, powered by [OpenRouter](https://openrouter.ai). Runs on Cloudflare Workers — free to host, no server to babysit.
+An AI Discord bot, powered by [Groq](https://groq.com). Runs on Cloudflare Workers — free to host, no server to babysit.
 
 ## Features
 
 - Chat by pinging the bot: `@AramGPT What's 1+1?`
 - `/aiprivacypolicy` — shows the bot's privacy policy
-- Uses OpenRouter's free model (`openrouter/free`)
+- Fast inference via Groq's LLM API (Llama 3.3 70B)
 - Stays online on its own — no manual restarts (Durable Object keeps the gateway alive, a cron job revives it if Discord drops the connection)
-- Per-user limits so the free API key doesn't get drained: **10 AI answers per user per day** (resets at UTC midnight) and a 5-second cooldown between calls
+- A short 5-second cooldown between calls to keep things tidy — no daily request limit
 
 ## How to use
 
@@ -30,9 +30,7 @@ No public servers currently use AramGPT.
 
 ## Can I add AramGPT to my server?
 
-Not the hosted public bot, sorry. It runs on the free tier of the OpenRouter API, so it can't handle the whole internet.
-
-But if you run a public server and want AramGPT, [contact me](mailto:aramcz@protonmail.com) — or host the bot yourself. It's free.
+Not the hosted public bot, sorry. But if you run a public server and want AramGPT, [contact me](mailto:aramcz@protonmail.com) — or host the bot yourself. It's free.
 
 ## Host it yourself
 
@@ -43,7 +41,7 @@ But if you run a public server and want AramGPT, [contact me](mailto:aramcz@prot
 
 - A [Cloudflare](https://dash.cloudflare.com) account (free)
 - A [Discord](https://discord.com/developers/applications) app (free)
-- An [OpenRouter](https://openrouter.ai) account (free) + API key
+- A [Groq](https://groq.com) account (free) + API key
 - A GitHub account (for the Cloudflare deploy flow)
 - Node.js (only for local builds / command registration)
 
@@ -81,7 +79,7 @@ But if you run a public server and want AramGPT, [contact me](mailto:aramcz@prot
    - **Entry point:** `src/worker.js`
 4. Click **Deploy**, then go to **Settings → Runtime variables and Secrets** and add two **secrets**:
    - `DISCORD_TOKEN` → the bot token from step 1
-   - `OPENROUTER_API_KEY` → your OpenRouter API key (from `openrouter.ai` → API keys)
+   - `GROQ_API_KEY` → your Groq API key (from `console.groq.com` → API Keys)
 5. Click **Save and Deploy**. Let it build — if you see a deploy failure, see [Troubleshooting](#troubleshooting).
 
 Need to change a secret later? Update it in **Settings → Runtime variables and Secrets** and redeploy — no code change required.
@@ -115,15 +113,13 @@ Done. Ping `@AramGPT` and it should answer.
 | Variable | Where | Required | Description |
 |---|---|---|---|
 | `DISCORD_TOKEN` | Cloudflare secret (+ `.dev.vars` for local command registration) | ✅ | Discord bot token |
-| `OPENROUTER_API_KEY` | Cloudflare secret | ✅ | OpenRouter API key |
+| `GROQ_API_KEY` | Cloudflare secret | ✅ | Groq API key |
 | `DISCORD_APP_ID` | `.dev.vars` only | for `/aiprivacypolicy` registration | Your Discord application ID (the bot's numeric ID) |
 
 ## Limits
 
-The bot throttles usage so a free OpenRouter key isn't exhausted:
-
-- **Per user:** 10 AI answers / day (resets at UTC midnight), 5s cooldown between requests
-- **OpenRouter free tier:** ~20 requests/minute, ~50 requests/day (free account)
+- **Cooldown:** 5s between requests per user (keeps things spam-free)
+- No daily request limit
 
 ## Checking the bot is alive
 
@@ -142,12 +138,12 @@ Visit `https://aramgpt.<your-subdomain>.workers.dev/status` in a browser. A heal
 The build command must be `npm run build`, not `npm build`. npm removed the `npm build` alias in npm 10.
 
 **Bot never comes online after deploy**
-Check that both `DISCORD_TOKEN` and `OPENROUTER_API_KEY` are set as *secrets* in **Runtime variables and Secrets**, then redeploy. Then check `/status`.
+Check that both `DISCORD_TOKEN` and `GROQ_API_KEY` are set as *secrets* in **Runtime variables and Secrets**, then redeploy. Then check `/status`.
 
 **`/aiprivacypolicy` doesn't appear**
 Global command registration can take up to 1 hour. If it's been longer, re-run `npm run register:commands` and make sure `DISCORD_APP_ID` in `.dev.vars` is the numeric application ID (not the bot username).
 
 **Bot replies "you need to wait" frequently**
-You're hitting the daily or cooldown limit. Wait 5 seconds between messages, and each user gets 10 answers per UTC day.
+That's the 5-second cooldown. Wait a few seconds between messages.
 
 Made by [AramCZ](mailto:aramcz@protonmail.com).

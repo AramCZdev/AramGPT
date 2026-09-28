@@ -1,14 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
 
 const DISCORD_API = "https://discord.com/api/v10";
-const OPENROUTER_API = "https://openrouter.ai/api/v1/chat/completions";
-const MODEL = "openrouter/free";
+const GROQ_API = "https://api.groq.com/openai/v1/chat/completions";
+const MODEL = "llama-3.3-70b-versatile";
 const GATEWAY_VERSION = "10";
 const MAX_MESSAGE_LENGTH = 2000;
 
-const DAILY_LIMIT = 20;
 const COOLDOWN_MS = 5000;
-const DAY_MS = 24 * 60 * 60 * 1000;
 const AI_TIMEOUT_MS = 30 * 1000;
 const HEARTBEAT_MARGIN_MS = 3000;
 const PRESENCE_REFRESH_MS = 5 * 60 * 1000;
@@ -29,13 +27,13 @@ const PRIVACY_POLICY = `**AramGPT Privacy Policy**
 The bot owner (AramCZ) does not collect, store, or sell any data. Nothing you send to the bot is read or kept by the creator.
 
 **What the bot does with your messages**
-AramGPT only processes messages that mention it. It temporarily keeps the last few messages of each conversation (up to 4) to provide context, plus a per-user counter for the daily usage limit (10 requests/day).
+AramGPT only processes messages that mention it. It temporarily keeps the last few messages of each conversation (up to 4) to provide context, plus a per-user timestamp for a short cooldown between requests.
 
 **Where data is stored**
-Message history and counters are stored in Cloudflare Durable Objects (SQLite) on Cloudflare's global edge network. Hosting and infrastructure are provided by Cloudflare. See the [Cloudflare Privacy Policy](https://www.cloudflare.com/privacypolicy/).
+Message history is stored in Cloudflare Durable Objects (SQLite) on Cloudflare's global edge network. Hosting and infrastructure are provided by Cloudflare. See the [Cloudflare Privacy Policy](https://www.cloudflare.com/privacypolicy/).
 
 **What is shared**
-To answer your message, your prompt and short conversation context are sent to OpenRouter.ai and processed by its "free" model. OpenRouter processes this data under its own terms and privacy policy: [OpenRouter Privacy Policy](https://openrouter.ai/privacy). No data is sold or shared with any other third party.
+To answer your message, your prompt and short conversation context are sent to Groq and processed by its LLM API. Groq processes this data under its own terms and privacy policy: [Groq Privacy Policy](https://groq.com/privacy-policy/). No data is sold or shared with any other third party.
 
 **Retention**
 Conversation history is a rolling window of the most recent messages and is overwritten as you chat. Message content is not stored beyond this short history.
@@ -438,24 +436,10 @@ export class DiscordGateway extends DurableObject {
     const userId = d.author.id;
 
     const rates = (await this.ctx.storage.get(KEY_RATE)) || { users: {} };
-    const user = rates.users[userId] || { count: 0, last: 0, resetAt: now };
-
-    const utcDayStart = Math.floor(now / DAY_MS) * DAY_MS;
-    if (user.resetAt < utcDayStart) {
-      user.count = 0;
-      user.resetAt = utcDayStart;
-    }
+    const user = rates.users[userId] || { last: 0 };
 
     if (now - user.last < COOLDOWN_MS) {
       await this.reply(d, "Please wait a few seconds before asking again.");
-      return;
-    }
-
-    if (user.count >= DAILY_LIMIT) {
-      await this.reply(
-        d,
-        "You've used your 10 AI requests for today. Try again tomorrow."
-      );
       return;
     }
 
@@ -472,7 +456,6 @@ export class DiscordGateway extends DurableObject {
       history.shift();
     }
 
-    user.count += 1;
     user.last = now;
     rates.users[userId] = user;
 
@@ -485,11 +468,11 @@ export class DiscordGateway extends DurableObject {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
 
-      const aiResponse = await fetch(OPENROUTER_API, {
+      const aiResponse = await fetch(GROQ_API, {
         method: "POST",
         signal: controller.signal,
         headers: {
-          Authorization: `Bearer ${this.env.OPENROUTER_API_KEY}`,
+          Authorization: `Bearer ${this.env.GROQ_API_KEY}`,
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
@@ -521,7 +504,7 @@ Personality:
       clearTimeout(timeout);
 
       if (!aiResponse.ok) {
-        throw new Error(`OpenRouter returned ${aiResponse.status}: ${await aiResponse.text()}`);
+        throw new Error(`Groq returned ${aiResponse.status}: ${await aiResponse.text()}`);
       }
 
       const result = await aiResponse.json();
@@ -539,9 +522,6 @@ Personality:
 
       history.pop();
       await this.ctx.storage.put(KEY_CONV + convoKey, history);
-
-      user.count = Math.max(0, user.count - 1);
-      await this.ctx.storage.put(KEY_RATE, rates);
 
       await this.reply(d, "Something went wrong while contacting the AI.");
     }

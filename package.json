@@ -9,7 +9,7 @@
     "deploy": "wrangler deploy",
     "register:commands": "node scripts/register-commands.mjs",
     "secret:token": "wrangler secret put DISCORD_TOKEN",
-    "secret:openrouter": "wrangler secret put OPENROUTER_API_KEY"
+    "secret:groq": "wrangler secret put GROQ_API_KEY"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250601.0",
