@@ -3,6 +3,7 @@ import { DurableObject } from "cloudflare:workers";
 const DISCORD_API = "https://discord.com/api/v10";
 const GROQ_API = "https://api.groq.com/openai/v1/chat/completions";
 const MODEL = "openai/gpt-oss-20b";
+const BUILD = "debug-model-gpt-oss-20b";
 const GATEWAY_VERSION = "10";
 const MAX_MESSAGE_LENGTH = 2000;
 
@@ -164,7 +165,10 @@ export class DiscordGateway extends DurableObject {
       wsState: this.ws ? this.ws.readyState : -1,
       bot: this.botId,
       seq: this.seq,
-      resume: Boolean(this.sessionId)
+      resume: Boolean(this.sessionId),
+      build: BUILD,
+      model: MODEL,
+      hasGroqKey: Boolean(this.env.GROQ_API_KEY)
     };
   }
 
