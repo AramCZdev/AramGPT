@@ -6,7 +6,7 @@ An AI Discord bot, powered by [Groq](https://groq.com). Runs on Cloudflare Worke
 
 - Chat by pinging the bot: `@AramGPT What's 1+1?`
 - `/aiprivacypolicy` — shows the bot's privacy policy
-- Fast inference via Groq's LLM API (Llama 3.3 70B)
+- Fast inference via Groq's LLM API (GPT OSS 20B)
 - Stays online on its own — no manual restarts (Durable Object keeps the gateway alive, a cron job revives it if Discord drops the connection)
 - A short 5-second cooldown between calls to keep things tidy — no daily request limit
 

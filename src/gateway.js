@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 
 const DISCORD_API = "https://discord.com/api/v10";
 const GROQ_API = "https://api.groq.com/openai/v1/chat/completions";
-const MODEL = "llama-3.3-70b-versatile";
+const MODEL = "openai/gpt-oss-20b";
 const GATEWAY_VERSION = "10";
 const MAX_MESSAGE_LENGTH = 2000;
 
