@@ -523,7 +523,10 @@ Personality:
       history.pop();
       await this.ctx.storage.put(KEY_CONV + convoKey, history);
 
-      await this.reply(d, "Something went wrong while contacting the AI.");
+      await this.reply(
+        d,
+        `AI request failed: ${String(error?.message ?? error).slice(0, 1500)}`
+      );
     }
   }
 
