@@ -5,6 +5,7 @@ An AI Discord bot, powered by [Groq](https://groq.com). Runs on Cloudflare Worke
 ## Features
 
 - Chat by pinging the bot: `@AramGPT What's 1+1?`
+- Live internet search — it looks things up when a question needs current information (news, releases, prices, sports, recent events)
 - `/aiprivacypolicy` — shows the bot's privacy policy
 - Fast inference via Groq's LLM API (GPT OSS 120B)
 - Stays online on its own — no manual restarts (Durable Object keeps the gateway alive, a cron job revives it if Discord drops the connection)
@@ -19,6 +20,14 @@ Ping the bot in a channel it can see:
 ```
 
 AramGPT replies. That's it.
+
+It can also search the web when the answer needs current information:
+
+```
+@AramGPT what's the latest Godot release?
+```
+
+Search is automatic — the model decides when it's needed, so normal chat stays fast. No extra API key is required; it uses Groq's built-in browser search, powered by Exa.
 
 You can also type `/aiprivacypolicy` to see the bot's privacy policy.
 
@@ -119,7 +128,9 @@ Done. Ping `@AramGPT` and it should answer.
 ## Limits
 
 - **Cooldown:** 5s between requests per user (keeps things spam-free)
-- No daily request limit
+- **Internet search:** only runs when the model decides it needs current info, so it does not slow down normal chat. Search replies usually take 5–30s.
+- **Groq free plan:** 8K tokens/minute. A web search can use most of that minute, so if several people search at once you may see an occasional "I'm being rate-limited" reply.
+- No daily request limit from the bot itself (Groq's free plan has its own daily token cap)
 
 ## Checking the bot is alive
 

@@ -3,12 +3,12 @@ import { DurableObject } from "cloudflare:workers";
 const DISCORD_API = "https://discord.com/api/v10";
 const GROQ_API = "https://api.groq.com/openai/v1/chat/completions";
 const MODEL = "openai/gpt-oss-120b";
-const BUILD = "debug-model-gpt-oss-20b";
+const BUILD = "web-search-browser-search";
 const GATEWAY_VERSION = "10";
 const MAX_MESSAGE_LENGTH = 2000;
 
 const COOLDOWN_MS = 5000;
-const AI_TIMEOUT_MS = 30 * 1000;
+const AI_TIMEOUT_MS = 90 * 1000;
 const HEARTBEAT_MARGIN_MS = 3000;
 const PRESENCE_REFRESH_MS = 5 * 60 * 1000;
 const RECONNECT_DELAY_MS = 3000;
@@ -34,10 +34,12 @@ AramGPT only processes messages that mention it. It temporarily keeps the last f
 Message history is stored in Cloudflare Durable Objects (SQLite) on Cloudflare's global edge network. Hosting and infrastructure are provided by Cloudflare. See the [Cloudflare Privacy Policy](https://www.cloudflare.com/privacypolicy/).
 
 **What is shared**
-To answer your message, your prompt and short conversation context are sent to Groq and processed by its LLM API. Groq processes this data under its own terms and privacy policy: [Groq Privacy Policy](https://groq.com/privacy-policy/). No data is sold or shared with any other third party.
+To answer your message, your prompt and short conversation context are sent to Groq and processed by its LLM API. Groq processes this data under its own terms and privacy policy: [Groq Privacy Policy](https://groq.com/privacy-policy/).
+
+When a message needs current information, the bot uses Groq's built-in web search, which is powered by [Exa](https://exa.ai). Your search query is sent to Groq and Exa to retrieve public web pages. Exa processes it under its own policy: [Exa Privacy Policy](https://exa.ai/privacy-policy). Search only runs when the model decides it is needed; not every message is searched. No data is sold, and nothing is shared with any other third party.
 
 **Retention**
-Conversation history is a rolling window of the most recent messages and is overwritten as you chat. Message content is not stored beyond this short history.
+Conversation history is a rolling window of the most recent messages and is overwritten as you chat. Message content is not stored beyond this short history. Web search results are used only to answer the message that triggered the search and are not stored separately.
 
 **Your data & you**
 AramGPT does not intentionally collect personal information as defined by GDPR/CCPA. Do not send sensitive personal data to the bot.
@@ -168,6 +170,7 @@ export class DiscordGateway extends DurableObject {
       resume: Boolean(this.sessionId),
       build: BUILD,
       model: MODEL,
+      webSearch: "browser_search",
       hasGroqKey: Boolean(this.env.GROQ_API_KEY)
     };
   }
@@ -466,11 +469,19 @@ export class DiscordGateway extends DurableObject {
     await this.ctx.storage.put(KEY_RATE, rates);
     await this.ctx.storage.put(KEY_CONV + convoKey, history);
 
+    let typingTimer;
+    let timeout;
+
     try {
       await this.sendTyping(d.channel_id);
 
+      // Browser search can take a while, so keep the typing indicator alive.
+      typingTimer = setInterval(() => {
+        void this.sendTyping(d.channel_id);
+      }, 8000);
+
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+      timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
 
       const aiResponse = await fetch(GROQ_API, {
         method: "POST",
@@ -481,6 +492,9 @@ export class DiscordGateway extends DurableObject {
         },
         body: JSON.stringify({
           model: MODEL,
+          reasoning_effort: "low",
+          tools: [{ type: "browser_search" }],
+          tool_choice: "auto",
           messages: [
             {
               role: "system",
@@ -497,6 +511,9 @@ Personality:
 - You are privacy-aware and suspicious of big tech. You never share secrets, keys, or personal data.
 - Don't claim to literally be your creator or know his private life (real names, exact address, passwords, etc.). You are a bot inspired by him, made by him (AramCZ).
 - If you don't know something, say so instead of making it up.
+- You have a built-in web search tool. Use it when a question depends on current or verifiable information (news, recent events, releases, prices, sports, specific facts you are unsure about). Do not search for casual chat, opinions, jokes, or things you already know confidently.
+- When you use search results, base your answer on them and include the source link(s). Never invent URLs, quotes, or search results. If search comes back empty or unhelpful, say so instead of guessing. Keep browsing minimal: one search, and at most one page open unless the question really needs more.
+- In Discord, cite sources as plain markdown links like [site name](https://example.com). Do not output the bracketed citation markers that search results use — turn them into a real link or leave them out.
 - Keep answers fairly short and to the point unless the topic is genuinely interesting or the user asks for detail. Everyone loves getting an actual answer, not a wall of text.
 - Your creator's commercial game he made is Hell Jump.
 
@@ -537,14 +554,12 @@ Safety and blocked words:
         })
       });
 
-      clearTimeout(timeout);
-
       if (!aiResponse.ok) {
         throw new Error(`Groq returned ${aiResponse.status}: ${await aiResponse.text()}`);
       }
 
       const result = await aiResponse.json();
-      const answer = result.choices?.[0]?.message?.content || "I couldn't generate a response.";
+      const answer = this.formatAnswer(result);
 
       history.push({ role: "assistant", content: answer });
       if (history.length > 4) {
@@ -559,10 +574,17 @@ Safety and blocked words:
       history.pop();
       await this.ctx.storage.put(KEY_CONV + convoKey, history);
 
+      const message = String(error?.message ?? error);
+
       await this.reply(
         d,
-        `AI request failed: ${String(error?.message ?? error).slice(0, 1500)}`
+        message.includes("429")
+          ? "I'm being rate-limited right now — give it a minute and try again."
+          : `AI request failed: ${message.slice(0, 1500)}`
       );
+    } finally {
+      clearInterval(typingTimer);
+      clearTimeout(timeout);
     }
   }
 
@@ -629,6 +651,34 @@ Safety and blocked words:
     }
 
     return content.trim();
+  }
+
+  formatAnswer(result) {
+    const message = result.choices?.[0]?.message;
+    let answer = message?.content || "I couldn't generate a response.";
+
+    const sources = [];
+    for (const tool of message?.executed_tools ?? []) {
+      for (const item of tool?.search_results?.results ?? []) {
+        if (item?.url && !sources.includes(item.url)) {
+          sources.push(item.url);
+        }
+      }
+    }
+
+    // Groq's browser search cites results with markers like 【0†L4-L9】.
+    // They render badly in Discord, so drop them and link sources instead.
+    answer = answer
+      .replace(/\s*【\d+†[^】]*】/g, "")
+      .replace(/[ \t]+\n/g, "\n")
+      .trim();
+
+    if (sources.length > 0 && !/https?:\/\//i.test(answer)) {
+      const links = sources.slice(0, 3).map((url) => `<${url}>`).join("\n");
+      answer += `\n\nSources:\n${links}`;
+    }
+
+    return answer;
   }
 
   clamp(text) {
