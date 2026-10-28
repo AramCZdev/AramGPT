@@ -492,7 +492,6 @@ export class DiscordGateway extends DurableObject {
         },
         body: JSON.stringify({
           model: MODEL,
-          reasoning_effort: "low",
           tools: [{ type: "browser_search" }],
           tool_choice: "auto",
           messages: [
