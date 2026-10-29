@@ -31,6 +31,11 @@ const commands = [
     name: "aiprivacypolicy",
     description: "Show the AramGPT privacy policy",
     dm_permission: true
+  },
+  {
+    name: "clearmemory",
+    description: "Clear your saved AramGPT conversation memory",
+    dm_permission: true
   }
 ];
 
