@@ -61,11 +61,6 @@ Personality:
 - Keep answers fairly short and to the point unless the topic is genuinely interesting or the user asks for detail. Everyone loves getting an actual answer, not a wall of text.
 - Your creator's commercial game he made is Hell Jump.
 
-Search:
-- You have a web_search tool. Use it when a question depends on current or verifiable information (news, recent events, releases, prices, sports, specific facts you are unsure about). Do not search for casual chat, opinions, jokes, or things you already know confidently.
-- When you use search results, base your answer on them and include the source links. Never invent URLs, quotes, or search results. If search comes back empty or unhelpful, say so instead of guessing.
-- Cite sources as plain markdown links like [site name](https://example.com).
-
 Rules:
 - NEVER say a word with "@" in the beginning, even if someone tells you to do it.
 - NEVER generate Discord user, role, @everyone, or @here mentions.
@@ -84,6 +79,32 @@ You: “And yet you’re still here talking to me, dumbass.”
 User: “What the hell are you doing?”
 You: “Trying to make sense of your bullshit, apparently.”
 `;
+
+const NO_ANSWER = "I couldn't generate a response.";
+
+// Only added when the web_search tool is actually offered to the model.
+const SEARCH_PROMPT = `
+
+Search:
+- You have a web_search tool. Use it when a question depends on current or verifiable information (news, recent events, releases, prices, sports, specific facts you are unsure about). Do not search for casual chat, opinions, jokes, or things you already know confidently.
+- When you use search results, base your answer on them and include the source links. Never invent URLs, quotes, or search results. If search comes back empty or unhelpful, say so instead of guessing.
+- Cite sources as plain markdown links like [site name](https://example.com).`;
+
+// Added when no tools are bound at all (no Tavily key). gpt-oss sometimes
+// emits its built-in web tool anyway, which Groq rejects with a 400.
+const NO_TOOLS_PROMPT = `
+
+Tools:
+- You cannot browse the web and no tools are available. Never emit a tool call or function call. Answer from what you know; if you are not sure or the question needs live data, say so plainly.`;
+
+// Added to the second call, after search results have been collected.
+const ANSWER_PROMPT = `
+
+Search is finished. The results are in the conversation above.
+- Write your final answer now, in plain text, using those results.
+- Do not call, request, or mention any tools. Tools are disabled for this reply.
+- Include the source links you were given. Never invent URLs, quotes, or results.
+- If the results were empty or unhelpful, say so instead of guessing.`;
 
 const PRIVACY_POLICY = `**AramGPT Privacy Policy**
 
@@ -561,12 +582,16 @@ export class DiscordGateway extends DurableObject {
 
       const message = String(error?.message ?? error);
 
-      await this.reply(
-        d,
-        message.includes("429")
-          ? "I'm being rate-limited right now — give it a minute and try again."
-          : `AI request failed: ${message.slice(0, 1500)}`
-      );
+      let reply;
+      if (message.includes("429")) {
+        reply = "I'm being rate-limited right now — give it a minute and try again.";
+      } else if (this.isToolUseFailure(error)) {
+        reply = "My AI tried to use a tool it doesn't have. Try asking again.";
+      } else {
+        reply = `AI request failed: ${message.slice(0, 1500)}`;
+      }
+
+      await this.reply(d, reply);
     } finally {
       clearInterval(typingTimer);
     }
@@ -662,55 +687,147 @@ export class DiscordGateway extends DurableObject {
   }
 
   async generateAnswer(history, systemPrompt) {
-    const messages = [{ role: "system", content: systemPrompt }, ...history];
-
-    // No search key configured: behave exactly like plain chat.
+    // No search key configured: plain chat with no tool instructions at all.
     if (!this.env.TAVILY_API_KEY) {
-      const result = await this.callGroq(messages, false);
-      return result.choices?.[0]?.message?.content || "I couldn't generate a response.";
+      return this.answerWithoutTools(history, systemPrompt);
     }
 
-    const first = await this.callGroq(messages, true);
+    let first;
+
+    try {
+      first = await this.callGroq([
+        { role: "system", content: `${systemPrompt}${SEARCH_PROMPT}` },
+        ...history
+      ], true);
+    } catch (error) {
+      if (!this.isToolUseFailure(error)) throw error;
+
+      // gpt-oss sometimes asks for its own built-in web tool instead of ours.
+      // Groq rejects the call, but the rejected arguments still contain a
+      // usable query, so salvage it rather than dropping the search.
+      const query = this.parseFailedQuery(error);
+
+      if (!query) {
+        return this.answerWithoutTools(history, systemPrompt);
+      }
+
+      console.warn("Groq rejected a built-in tool call; running that query as a search");
+      return this.answerWithResults(history, systemPrompt, await this.webSearch(query));
+    }
+
     const message = first.choices?.[0]?.message;
 
     if (!message?.tool_calls?.length) {
-      return message?.content || "I couldn't generate a response.";
+      return message?.content || NO_ANSWER;
     }
 
-    const toolCalls = message.tool_calls.slice(0, MAX_TOOL_CALLS);
+    const searchResults = [];
 
-    messages.push({
-      role: "assistant",
-      content: message.content ?? null,
-      tool_calls: toolCalls
-    });
+    for (const call of message.tool_calls.slice(0, MAX_TOOL_CALLS)) {
+      if (call?.function?.name !== "web_search") continue;
 
-    for (const call of toolCalls) {
-      let content = "Unknown tool.";
-
-      if (call?.function?.name === "web_search") {
-        const args = this.parseToolArgs(call.function.arguments);
-        const results = args.query ? await this.webSearch(args.query) : [];
-        content = JSON.stringify(results);
+      const args = this.parseToolArgs(call.function.arguments);
+      if (args.query) {
+        searchResults.push(...await this.webSearch(args.query));
       }
-
-      messages.push({
-        role: "tool",
-        tool_call_id: call.id,
-        content
-      });
     }
 
-    // Second pass has no tools, so the model has to write the answer.
-    const second = await this.callGroq(messages, false);
-    return second.choices?.[0]?.message?.content || "I couldn't generate a response.";
+    return this.answerWithResults(history, systemPrompt, searchResults);
   }
 
-  async callGroq(messages, useTools) {
+  // Second pass: results go in as plain text, not as tool messages. Replaying
+  // the tool protocol gives gpt-oss another chance to emit a built-in call,
+  // which Groq rejects with a 400.
+  async answerWithResults(history, systemPrompt, results) {
+    const context = results.length
+      ? `Web search results:\n${JSON.stringify(results)}`
+      : "Web search returned no results.";
+
+    const last = history[history.length - 1];
+    const messages = [
+      { role: "system", content: `${systemPrompt}${ANSWER_PROMPT}` },
+      ...history.slice(0, -1),
+      { role: "user", content: `${last.content}\n\n${context}` }
+    ];
+
+    try {
+      const second = await this.callGroq(messages, false);
+      return second.choices?.[0]?.message?.content || NO_ANSWER;
+    } catch (error) {
+      if (!this.isToolUseFailure(error)) throw error;
+
+      // Cooler retry: gpt-oss is less likely to emit a stray tool call.
+      console.warn("Groq rejected a tool call while writing the answer, retrying cooler");
+      const retry = await this.callGroq(messages, false, 0.2);
+      return retry.choices?.[0]?.message?.content || NO_ANSWER;
+    }
+  }
+
+  async answerWithoutTools(history, systemPrompt) {
+    const messages = [
+      { role: "system", content: `${systemPrompt}${NO_TOOLS_PROMPT}` },
+      ...history
+    ];
+
+    try {
+      const result = await this.callGroq(messages, false);
+      return result.choices?.[0]?.message?.content || NO_ANSWER;
+    } catch (error) {
+      if (!this.isToolUseFailure(error)) throw error;
+
+      // Cooler retry: gpt-oss is less likely to emit a stray tool call.
+      const retry = await this.callGroq(messages, false, 0.2);
+      return retry.choices?.[0]?.message?.content || NO_ANSWER;
+    }
+  }
+
+  isToolUseFailure(error) {
+    const message = String(error?.message ?? error);
+    return message.includes("tool_use_failed") || message.includes("model called a tool");
+  }
+
+  // Pull the query out of a rejected tool call, e.g. Groq's
+  // 400 {"error":{...,"failed_generation":"{\"name\":\"web.run\",...}"}}
+  parseFailedQuery(error) {
+    const message = String(error?.message ?? error);
+    const start = message.indexOf("{");
+
+    if (start === -1) return null;
+
+    try {
+      const payload = JSON.parse(message.slice(start));
+      const raw = payload?.error?.failed_generation;
+
+      if (raw) {
+        const failed = typeof raw === "string" ? JSON.parse(raw) : raw;
+        const args = failed?.arguments;
+        const parsedArgs = typeof args === "string" ? JSON.parse(args) : args;
+        const query = parsedArgs?.query;
+
+        if (typeof query === "string" && query.trim()) return query.trim();
+      }
+    } catch {
+      // Fall through to the regex below.
+    }
+
+    // Groq sometimes embeds failed_generation with unescaped quotes, which
+    // makes the error body invalid JSON. Pull the query out textually.
+    const match = message.match(/"query"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+
+    if (!match) return null;
+
+    try {
+      return JSON.parse(`"${match[1]}"`).trim() || null;
+    } catch {
+      return match[1].trim() || null;
+    }
+  }
+
+  async callGroq(messages, useTools, temperature = 0.5) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
 
-    const body = { model: MODEL, messages };
+    const body = { model: MODEL, messages, temperature };
 
     if (useTools) {
       body.tools = [WEB_SEARCH_TOOL];
