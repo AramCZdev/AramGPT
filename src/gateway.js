@@ -615,32 +615,8 @@ export class DiscordGateway extends DurableObject {
     if (d.type !== 2) return;
 
     const name = d.data?.name;
-    let content;
-    let flags;
-
-    if (name === "clearmemory") {
-      const userId = d.member?.user?.id ?? d.user?.id;
-      if (!userId) {
-        content = "I couldn't identify your Discord account, so no memory was cleared.";
-        flags = 64;
-      } else {
-        const conversations = await this.ctx.storage.list({ prefix: KEY_CONV });
-        const keysToDelete = [];
-        for (const key of conversations.keys()) {
-          if (key.endsWith(`:${userId}`)) keysToDelete.push(key);
-        }
-        if (keysToDelete.length > 0) {
-          await this.ctx.storage.delete(keysToDelete);
-        }
-        content = keysToDelete.length > 0
-          ? "Your AramGPT conversation memory has been cleared."
-          : "You don't have any saved AramGPT conversation memory to clear.";
-        flags = 64;
-      }
-    } else {
-      content = this.commandOutput(name);
-      if (!content) return;
-    }
+    const content = this.commandOutput(name);
+    if (!content) return;
 
     try {
       const response = await fetch(`${DISCORD_API}/interactions/${d.id}/${d.token}/callback`, {
@@ -648,7 +624,7 @@ export class DiscordGateway extends DurableObject {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           type: 4,
-          data: flags ? { content, flags } : { content }
+          data: { content }
         })
       });
       if (!response.ok) {
