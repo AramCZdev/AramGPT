@@ -3,14 +3,18 @@ import { resolve } from "node:path";
 
 function loadEnv() {
   const env = {};
-  const text = readFileSync(resolve(process.cwd(), ".dev.vars"), "utf8");
-  for (const line of text.split("\n")) {
-    const match = line.match(/^([A-Z_]+)=(.*)$/);
-    if (match) {
-      env[match[1]] = match[2].trim();
+  try {
+    const text = readFileSync(resolve(process.cwd(), ".dev.vars"), "utf8");
+    for (const line of text.split("\n")) {
+      const match = line.match(/^([A-Z_]+)=(.*)$/);
+      if (match) {
+        env[match[1]] = match[2].trim();
+      }
     }
+  } catch {
+    // .dev.vars is optional when credentials are supplied through environment variables.
   }
-  return env;
+  return { ...env, ...process.env };
 }
 
 const env = loadEnv();
@@ -30,6 +34,11 @@ const commands = [
   {
     name: "aiprivacypolicy",
     description: "Show the AramGPT privacy policy",
+    dm_permission: true
+  },
+  {
+    name: "clearmemory",
+    description: "Clear your saved AramGPT conversation memory",
     dm_permission: true
   }
 ];
