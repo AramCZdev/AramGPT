@@ -5,6 +5,7 @@ An AI Discord bot, powered by [Groq](https://groq.com). Runs on Cloudflare Worke
 ## Features
 
 - Chat by pinging the bot: `@AramGPT What's 1+1?`
+- Live internet search — optional, needs a free Tavily key; it looks things up when a question needs current information (news, releases, prices, sports, recent events)
 - `/aiprivacypolicy` — shows the bot's privacy policy
 - Fast inference via Groq's LLM API (GPT OSS 120B)
 - Stays online on its own — no manual restarts (Durable Object keeps the gateway alive, a cron job revives it if Discord drops the connection)
@@ -19,6 +20,14 @@ Ping the bot in a channel it can see:
 ```
 
 AramGPT replies. That's it.
+
+It can also search the web when the answer needs current information:
+
+```
+@AramGPT what's the latest Godot release?
+```
+
+Search is automatic — the model decides when it's needed, so normal chat stays fast. It uses [Tavily](https://tavily.com) to fetch a few short results and then answers normally, which keeps token use low.
 
 You can also type `/aiprivacypolicy` to see the bot's privacy policy.
 
@@ -114,12 +123,27 @@ Done. Ping `@AramGPT` and it should answer.
 |---|---|---|---|
 | `DISCORD_TOKEN` | Cloudflare secret (+ `.dev.vars` for local command registration) | ✅ | Discord bot token |
 | `GROQ_API_KEY` | Cloudflare secret | ✅ | Groq API key |
+| `TAVILY_API_KEY` | Cloudflare secret | optional | Enables web search (`npm run secret:tavily`) |
 | `DISCORD_APP_ID` | `.dev.vars` only | for `/aiprivacypolicy` registration | Your Discord application ID (the bot's numeric ID) |
+
+## Search (optional)
+
+Web search uses [Tavily](https://tavily.com), which has a free tier of **1,000 searches/month** and no credit card.
+
+1. Create a free key at [app.tavily.com](https://app.tavily.com)
+2. Run `npm run secret:tavily` and paste the key
+3. Deploy (or restart `npm run dev`)
+
+Without `TAVILY_API_KEY`, the bot skips search entirely and behaves like plain chat. `/status` reports `webSearch: true` when it's enabled.
+
+Each search makes two Groq calls: one to decide the query, then one to write the answer from a handful of short snippets. That costs roughly **4–5K tokens**, versus the **100K+** Groq's built-in browser search used.
 
 ## Limits
 
 - **Cooldown:** 5s between requests per user (keeps things spam-free)
-- No daily request limit
+- **Search:** only runs when the model decides it needs current info. A search uses two Groq calls instead of one, so it costs more of the free daily token quota.
+- **Tavily:** 1,000 searches/month on the free plan.
+- No daily request limit from the bot itself
 
 ## Checking the bot is alive
 
