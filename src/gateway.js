@@ -9,6 +9,7 @@ const MAX_MESSAGE_LENGTH = 2000;
 
 const COOLDOWN_MS = 5000;
 const AI_TIMEOUT_MS = 30 * 1000;
+const MAX_COMPLETION_TOKENS = 2048;
 const SEARCH_TIMEOUT_MS = 10 * 1000;
 const MAX_SEARCH_RESULTS = 4;
 const MAX_TOOL_CALLS = 2;
@@ -718,7 +719,7 @@ export class DiscordGateway extends DurableObject {
     const message = first.choices?.[0]?.message;
 
     if (!message?.tool_calls?.length) {
-      return message?.content || NO_ANSWER;
+      return this.extractContent(first) || NO_ANSWER;
     }
 
     const searchResults = [];
@@ -752,14 +753,14 @@ export class DiscordGateway extends DurableObject {
 
     try {
       const second = await this.callGroq(messages, false);
-      return second.choices?.[0]?.message?.content || NO_ANSWER;
+      return this.extractContent(second) || NO_ANSWER;
     } catch (error) {
       if (!this.isToolUseFailure(error)) throw error;
 
       // Cooler retry: gpt-oss is less likely to emit a stray tool call.
       console.warn("Groq rejected a tool call while writing the answer, retrying cooler");
       const retry = await this.callGroq(messages, false, 0.2);
-      return retry.choices?.[0]?.message?.content || NO_ANSWER;
+      return this.extractContent(retry) || NO_ANSWER;
     }
   }
 
@@ -771,13 +772,13 @@ export class DiscordGateway extends DurableObject {
 
     try {
       const result = await this.callGroq(messages, false);
-      return result.choices?.[0]?.message?.content || NO_ANSWER;
+      return this.extractContent(result) || NO_ANSWER;
     } catch (error) {
       if (!this.isToolUseFailure(error)) throw error;
 
       // Cooler retry: gpt-oss is less likely to emit a stray tool call.
       const retry = await this.callGroq(messages, false, 0.2);
-      return retry.choices?.[0]?.message?.content || NO_ANSWER;
+      return this.extractContent(retry) || NO_ANSWER;
     }
   }
 
@@ -824,10 +825,31 @@ export class DiscordGateway extends DurableObject {
   }
 
   async callGroq(messages, useTools, temperature = 0.5) {
+    const result = await this.requestGroq(messages, useTools, temperature);
+
+    if (this.hasOutput(result)) {
+      return result;
+    }
+
+    // gpt-oss is a reasoning model: with a long prompt it can burn the whole
+    // completion budget on hidden reasoning and return empty content, usually
+    // with finish_reason "length". Retry once cooler.
+    const finish = result?.choices?.[0]?.finish_reason;
+    console.warn(`Groq returned an empty generation (finish_reason: ${finish}), retrying`);
+
+    return this.requestGroq(messages, useTools, 0.2);
+  }
+
+  async requestGroq(messages, useTools, temperature) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
 
-    const body = { model: MODEL, messages, temperature };
+    const body = {
+      model: MODEL,
+      messages,
+      temperature,
+      max_completion_tokens: MAX_COMPLETION_TOKENS
+    };
 
     if (useTools) {
       body.tools = [WEB_SEARCH_TOOL];
@@ -853,6 +875,32 @@ export class DiscordGateway extends DurableObject {
     } finally {
       clearTimeout(timeout);
     }
+  }
+
+  hasOutput(result) {
+    const message = result?.choices?.[0]?.message;
+
+    if (!message) return false;
+    if (message.tool_calls?.length) return true;
+
+    return this.extractContent(result).length > 0;
+  }
+
+  extractContent(result) {
+    const content = result?.choices?.[0]?.message?.content;
+
+    if (typeof content === "string") {
+      return content.trim();
+    }
+
+    if (Array.isArray(content)) {
+      return content
+        .map((part) => (typeof part === "string" ? part : part?.text ?? ""))
+        .join("")
+        .trim();
+    }
+
+    return "";
   }
 
   async webSearch(query) {
