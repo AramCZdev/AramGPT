@@ -1,9 +1,12 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-function loadEnv() {
+function loadEnvFile() {
+  const path = resolve(process.cwd(), ".dev.vars");
+  if (!existsSync(path)) return {};
+
   const env = {};
-  const text = readFileSync(resolve(process.cwd(), ".dev.vars"), "utf8");
+  const text = readFileSync(path, "utf8");
   for (const line of text.split("\n")) {
     const match = line.match(/^([A-Z_]+)=(.*)$/);
     if (match) {
@@ -13,16 +16,17 @@ function loadEnv() {
   return env;
 }
 
-const env = loadEnv();
+// GitHub Actions supplies secrets through process.env; local runs can use .dev.vars.
+const env = { ...loadEnvFile(), ...process.env };
 const token = env.DISCORD_TOKEN;
 if (!token) {
-  console.error("DISCORD_TOKEN not found in .dev.vars");
+  console.error("DISCORD_TOKEN is missing. Set it as an environment variable or in .dev.vars.");
   process.exit(1);
 }
 
 const appId = env.DISCORD_APP_ID;
 if (!appId) {
-  console.error("DISCORD_APP_ID not found in .dev.vars");
+  console.error("DISCORD_APP_ID is missing. Set it as an environment variable or in .dev.vars.");
   process.exit(1);
 }
 
