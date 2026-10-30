@@ -10,11 +10,6 @@ const MAX_MESSAGE_LENGTH = 2000;
 const COOLDOWN_MS = 5000;
 const AI_TIMEOUT_MS = 30 * 1000;
 const MAX_COMPLETION_TOKENS = 2048;
-const SEARCH_TIMEOUT_MS = 10 * 1000;
-const MAX_SEARCH_RESULTS = 4;
-const MAX_TOOL_CALLS = 2;
-const SEARCH_SNIPPET_CHARS = 500;
-const TAVILY_API = "https://api.tavily.com/search";
 const HEARTBEAT_MARGIN_MS = 3000;
 const PRESENCE_REFRESH_MS = 5 * 60 * 1000;
 const RECONNECT_DELAY_MS = 3000;
@@ -27,24 +22,6 @@ const KEY_RATE = "rate";
 const KEY_CONV = "conv:";
 
 const NO_RESUME_CODES = new Set([4000, 4001, 4002, 4004, 4005, 4007, 4008, 4009, 4010, 4013, 4014]);
-
-const WEB_SEARCH_TOOL = {
-  type: "function",
-  function: {
-    name: "web_search",
-    description: "Search the public web for current or verifiable information. Returns a short list of titles, URLs, and snippets.",
-    parameters: {
-      type: "object",
-      properties: {
-        query: {
-          type: "string",
-          description: "The search query, phrased like a web search."
-        }
-      },
-      required: ["query"]
-    }
-  }
-};
 
 const SYSTEM_PROMPT = `
 You are AramGPT, a Discord AI bot inspired by the personality of your creator, AramCZ. You talk like he does.
@@ -81,30 +58,6 @@ You: “Trying to make sense of your bullshit, apparently.”
 
 const NO_ANSWER = "I couldn't generate a response.";
 
-// Only added when the web_search tool is actually offered to the model.
-const SEARCH_PROMPT = `
-
-Search:
-- You have a web_search tool. Use it when a question depends on current or verifiable information (news, recent events, releases, prices, sports, specific facts you are unsure about). Do not search for casual chat, opinions, jokes, or things you already know confidently.
-- When you use search results, base your answer on them and include the source links. Never invent URLs, quotes, or search results. If search comes back empty or unhelpful, say so instead of guessing.
-- Cite sources as plain markdown links like [site name](https://example.com).`;
-
-// Added when no tools are bound at all (no Tavily key). gpt-oss sometimes
-// emits its built-in web tool anyway, which Groq rejects with a 400.
-const NO_TOOLS_PROMPT = `
-
-Tools:
-- You cannot browse the web and no tools are available. Never emit a tool call or function call. Answer from what you know; if you are not sure or the question needs live data, say so plainly.`;
-
-// Added to the second call, after search results have been collected.
-const ANSWER_PROMPT = `
-
-Search is finished. The results are in the conversation above.
-- Write your final answer now, in plain text, using those results.
-- Do not call, request, or mention any tools. Tools are disabled for this reply.
-- Include the source links you were given. Never invent URLs, quotes, or results.
-- If the results were empty or unhelpful, say so instead of guessing.`;
-
 const PRIVACY_POLICY = `**AramGPT Privacy Policy**
 
 **No data collection by the creator**
@@ -118,8 +71,6 @@ Message history is stored in Cloudflare Durable Objects (SQLite) on Cloudflare's
 
 **What is shared**
 To answer your message, your prompt and short conversation context are sent to Groq and processed by its LLM API. Groq processes this data under its own terms and privacy policy: [Groq Privacy Policy](https://groq.com/privacy-policy/).
-
-When a message needs current information, the bot may search the web using [Tavily](https://tavily.com). Only the search query is sent to Tavily; search results are used to answer that message and are not stored separately. Tavily processes the query under its own policy: [Tavily Privacy Policy](https://tavily.com/privacy).
 
 No data is sold or shared with any other third party.
 
@@ -255,7 +206,6 @@ export class DiscordGateway extends DurableObject {
       resume: Boolean(this.sessionId),
       build: BUILD,
       model: MODEL,
-      webSearch: Boolean(this.env.TAVILY_API_KEY),
       hasGroqKey: Boolean(this.env.GROQ_API_KEY)
     };
   }
@@ -559,7 +509,6 @@ export class DiscordGateway extends DurableObject {
     try {
       await this.sendTyping(d.channel_id);
 
-      // Web search adds a second round trip, so keep the typing indicator alive.
       typingTimer = setInterval(() => {
         void this.sendTyping(d.channel_id);
       }, 8000);
@@ -584,8 +533,6 @@ export class DiscordGateway extends DurableObject {
       let reply;
       if (message.includes("429")) {
         reply = "I'm being rate-limited right now — give it a minute and try again.";
-      } else if (this.isToolUseFailure(error)) {
-        reply = "My AI tried to use a tool it doesn't have. Try asking again.";
       } else {
         reply = `AI request failed: ${message.slice(0, 1500)}`;
       }
@@ -613,8 +560,24 @@ export class DiscordGateway extends DurableObject {
     if (d.type !== 2) return;
 
     const name = d.data?.name;
-    const content = this.commandOutput(name);
-    if (!content) return;
+    let content;
+
+    try {
+      if (name === "clearmemory") {
+        const userId = d.member?.user?.id ?? d.user?.id;
+        if (!d.channel_id || !userId) {
+          throw new Error("Missing channel or user information");
+        }
+
+        await this.ctx.storage.delete(KEY_CONV + `${d.channel_id}:${userId}`);
+        content = "Your AramGPT conversation history in this channel has been cleared.";
+      } else {
+        content = this.commandOutput(name) ?? "Unknown command.";
+      }
+    } catch (error) {
+      console.error("slash command failed:", error);
+      content = "I couldn't clear your conversation history. Please try again.";
+    }
 
     try {
       const response = await fetch(`${DISCORD_API}/interactions/${d.id}/${d.token}/callback`, {
@@ -622,7 +585,7 @@ export class DiscordGateway extends DurableObject {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           type: 4,
-          data: { content }
+          data: { content, flags: 64 }
         })
       });
       if (!response.ok) {
@@ -662,159 +625,29 @@ export class DiscordGateway extends DurableObject {
   }
 
   async generateAnswer(history, systemPrompt) {
-    // No search key configured: plain chat with no tool instructions at all.
-    if (!this.env.TAVILY_API_KEY) {
-      return this.answerWithoutTools(history, systemPrompt);
-    }
-
-    let first;
-
-    try {
-      first = await this.callGroq([
-        { role: "system", content: `${systemPrompt}${SEARCH_PROMPT}` },
-        ...history
-      ], true);
-    } catch (error) {
-      if (!this.isToolUseFailure(error)) throw error;
-
-      // gpt-oss sometimes asks for its own built-in web tool instead of ours.
-      // Groq rejects the call, but the rejected arguments still contain a
-      // usable query, so salvage it rather than dropping the search.
-      const query = this.parseFailedQuery(error);
-
-      if (!query) {
-        return this.answerWithoutTools(history, systemPrompt);
-      }
-
-      console.warn("Groq rejected a built-in tool call; running that query as a search");
-      return this.answerWithResults(history, systemPrompt, await this.webSearch(query));
-    }
-
-    const message = first.choices?.[0]?.message;
-
-    if (!message?.tool_calls?.length) {
-      return this.extractContent(first) || NO_ANSWER;
-    }
-
-    const searchResults = [];
-
-    for (const call of message.tool_calls.slice(0, MAX_TOOL_CALLS)) {
-      if (call?.function?.name !== "web_search") continue;
-
-      const args = this.parseToolArgs(call.function.arguments);
-      if (args.query) {
-        searchResults.push(...await this.webSearch(args.query));
-      }
-    }
-
-    return this.answerWithResults(history, systemPrompt, searchResults);
-  }
-
-  // Second pass: results go in as plain text, not as tool messages. Replaying
-  // the tool protocol gives gpt-oss another chance to emit a built-in call,
-  // which Groq rejects with a 400.
-  async answerWithResults(history, systemPrompt, results) {
-    const context = results.length
-      ? `Web search results:\n${JSON.stringify(results)}`
-      : "Web search returned no results.";
-
-    const last = history[history.length - 1];
     const messages = [
-      { role: "system", content: `${systemPrompt}${ANSWER_PROMPT}` },
-      ...history.slice(0, -1),
-      { role: "user", content: `${last.content}\n\n${context}` }
-    ];
-
-    try {
-      const second = await this.callGroq(messages, false);
-      return this.extractContent(second) || NO_ANSWER;
-    } catch (error) {
-      if (!this.isToolUseFailure(error)) throw error;
-
-      // Cooler retry: gpt-oss is less likely to emit a stray tool call.
-      console.warn("Groq rejected a tool call while writing the answer, retrying cooler");
-      const retry = await this.callGroq(messages, false, 0.2);
-      return this.extractContent(retry) || NO_ANSWER;
-    }
-  }
-
-  async answerWithoutTools(history, systemPrompt) {
-    const messages = [
-      { role: "system", content: `${systemPrompt}${NO_TOOLS_PROMPT}` },
+      { role: "system", content: systemPrompt },
       ...history
     ];
 
-    try {
-      const result = await this.callGroq(messages, false);
-      return this.extractContent(result) || NO_ANSWER;
-    } catch (error) {
-      if (!this.isToolUseFailure(error)) throw error;
-
-      // Cooler retry: gpt-oss is less likely to emit a stray tool call.
-      const retry = await this.callGroq(messages, false, 0.2);
-      return this.extractContent(retry) || NO_ANSWER;
-    }
+    const result = await this.callGroq(messages);
+    return this.extractContent(result) || NO_ANSWER;
   }
 
-  isToolUseFailure(error) {
-    const message = String(error?.message ?? error);
-    return message.includes("tool_use_failed") || message.includes("model called a tool");
-  }
-
-  // Pull the query out of a rejected tool call, e.g. Groq's
-  // 400 {"error":{...,"failed_generation":"{\"name\":\"web.run\",...}"}}
-  parseFailedQuery(error) {
-    const message = String(error?.message ?? error);
-    const start = message.indexOf("{");
-
-    if (start === -1) return null;
-
-    try {
-      const payload = JSON.parse(message.slice(start));
-      const raw = payload?.error?.failed_generation;
-
-      if (raw) {
-        const failed = typeof raw === "string" ? JSON.parse(raw) : raw;
-        const args = failed?.arguments;
-        const parsedArgs = typeof args === "string" ? JSON.parse(args) : args;
-        const query = parsedArgs?.query;
-
-        if (typeof query === "string" && query.trim()) return query.trim();
-      }
-    } catch {
-      // Fall through to the regex below.
-    }
-
-    // Groq sometimes embeds failed_generation with unescaped quotes, which
-    // makes the error body invalid JSON. Pull the query out textually.
-    const match = message.match(/"query"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-
-    if (!match) return null;
-
-    try {
-      return JSON.parse(`"${match[1]}"`).trim() || null;
-    } catch {
-      return match[1].trim() || null;
-    }
-  }
-
-  async callGroq(messages, useTools, temperature = 0.5) {
-    const result = await this.requestGroq(messages, useTools, temperature);
+  async callGroq(messages, temperature = 0.5) {
+    const result = await this.requestGroq(messages, temperature);
 
     if (this.hasOutput(result)) {
       return result;
     }
 
-    // gpt-oss is a reasoning model: with a long prompt it can burn the whole
-    // completion budget on hidden reasoning and return empty content, usually
-    // with finish_reason "length". Retry once cooler.
     const finish = result?.choices?.[0]?.finish_reason;
     console.warn(`Groq returned an empty generation (finish_reason: ${finish}), retrying`);
 
-    return this.requestGroq(messages, useTools, 0.2);
+    return this.requestGroq(messages, 0.2);
   }
 
-  async requestGroq(messages, useTools, temperature) {
+  async requestGroq(messages, temperature) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
 
@@ -824,11 +657,6 @@ export class DiscordGateway extends DurableObject {
       temperature,
       max_completion_tokens: MAX_COMPLETION_TOKENS
     };
-
-    if (useTools) {
-      body.tools = [WEB_SEARCH_TOOL];
-      body.tool_choice = "auto";
-    }
 
     try {
       const response = await fetch(GROQ_API, {
@@ -855,7 +683,6 @@ export class DiscordGateway extends DurableObject {
     const message = result?.choices?.[0]?.message;
 
     if (!message) return false;
-    if (message.tool_calls?.length) return true;
 
     return this.extractContent(result).length > 0;
   }
@@ -875,56 +702,6 @@ export class DiscordGateway extends DurableObject {
     }
 
     return "";
-  }
-
-  async webSearch(query) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
-
-    try {
-      const response = await fetch(TAVILY_API, {
-        method: "POST",
-        signal: controller.signal,
-        headers: {
-          Authorization: `Bearer ${this.env.TAVILY_API_KEY}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          query,
-          search_depth: "basic",
-          max_results: MAX_SEARCH_RESULTS
-        })
-      });
-
-      if (!response.ok) {
-        console.error(`Tavily returned ${response.status}: ${await response.text()}`);
-        return [];
-      }
-
-      const result = await response.json();
-
-      return (result.results ?? []).slice(0, MAX_SEARCH_RESULTS).map((item) => ({
-        title: item.title ?? "",
-        url: item.url ?? "",
-        snippet: (item.content ?? "").slice(0, SEARCH_SNIPPET_CHARS)
-      }));
-    } catch (error) {
-      console.error("webSearch failed:", error);
-      return [];
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-
-  parseToolArgs(raw) {
-    if (!raw) return {};
-
-    try {
-      const parsed = JSON.parse(raw);
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-    } catch {
-      return {};
-    }
   }
 
   clamp(text) {
