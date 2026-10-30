@@ -559,6 +559,23 @@ export class DiscordGateway extends DurableObject {
   async onInteraction(d) {
     if (d.type !== 2) return;
 
+    const callbackUrl = `${DISCORD_API}/interactions/${d.id}/${d.token}/callback`;
+
+    // Acknowledge immediately so Discord does not time out while storage is accessed.
+    const acknowledgement = await fetch(callbackUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: 5,
+        data: { flags: 64 }
+      })
+    });
+
+    if (!acknowledgement.ok) {
+      console.error(`interaction acknowledgement failed with ${acknowledgement.status}:`, await acknowledgement.text());
+      return;
+    }
+
     const name = d.data?.name;
     let content;
 
@@ -579,20 +596,15 @@ export class DiscordGateway extends DurableObject {
       content = "I couldn't clear your conversation history. Please try again.";
     }
 
-    try {
-      const response = await fetch(`${DISCORD_API}/interactions/${d.id}/${d.token}/callback`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: 4,
-          data: { content, flags: 64 }
-        })
-      });
-      if (!response.ok) {
-        console.error(`interaction callback failed with ${response.status}:`, await response.text());
-      }
-    } catch (error) {
-      console.error("interaction callback failed:", error);
+    const editUrl = `${DISCORD_API}/webhooks/${d.application_id}/${d.token}/messages/@original`;
+    const response = await fetch(editUrl, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content })
+    });
+
+    if (!response.ok) {
+      console.error(`interaction response edit failed with ${response.status}:`, await response.text());
     }
   }
 
